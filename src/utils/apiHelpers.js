@@ -54,6 +54,30 @@ function parseJsonSafely(input) {
   }
 }
 
+function buildEnhancedPromptFallback(input) {
+  return `Editorial product photography of ${input.trim()}, captured from a low three-quarter angle with cinematic golden-hour lighting, crisp material texture, refined depth of field, and an aspirational luxury campaign mood. Blend contemporary commercial realism with subtle magazine styling and polished color grading for a premium finish.`
+}
+
+function buildImageFallback(title, prompt, accentA, accentB) {
+  return {
+    url: createSvgPlaceholder(title, prompt.slice(0, 120), accentA, accentB),
+    alt: prompt,
+  }
+}
+
+function buildAnalysisFallback() {
+  return {
+    mainObjects:
+      'A hero subject framed prominently with supporting environmental details.',
+    colorPalette:
+      'Deep teal, soft apricot highlights, charcoal shadows, and muted cream accents.',
+    artisticStyle:
+      'Glossy campaign photography with cinematic contrast and editorial polish.',
+    variationPrompt:
+      'Create a fresh editorial variation of the uploaded scene with the same key subject, deep teal and apricot palette, cinematic lighting, refined textures, and a premium campaign feel.',
+  }
+}
+
 async function callOpenAIChat(messages) {
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -83,60 +107,69 @@ async function callOpenAIChat(messages) {
 
 export async function getEnhancedPrompt(input, systemPrompt) {
   if (!hasUsableOpenAIKey()) {
-    return `Editorial product photography of ${input.trim()}, captured from a low three-quarter angle with cinematic golden-hour lighting, crisp material texture, refined depth of field, and an aspirational luxury campaign mood. Blend contemporary commercial realism with subtle magazine styling and polished color grading for a premium finish.`
+    return buildEnhancedPromptFallback(input)
   }
 
-  return callOpenAIChat([
-    { role: 'system', content: systemPrompt },
-    { role: 'user', content: input },
-  ])
+  try {
+    return await callOpenAIChat([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: input },
+    ])
+  } catch (error) {
+    console.warn('Falling back to local prompt enhancement.', error)
+    return buildEnhancedPromptFallback(input)
+  }
 }
 
 export async function generateImageFromPrompt(prompt) {
   if (!hasUsableOpenAIKey()) {
-    return {
-      url: createSvgPlaceholder(
-        'Creative Studio Output',
-        prompt.slice(0, 120),
-        '#1d4ed8',
-        '#ec4899',
-      ),
-      alt: prompt,
-    }
-  }
-
-  const response = await fetch('https://api.openai.com/v1/images/generations', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: OPENAI_IMAGE_MODEL,
+    return buildImageFallback(
+      'Creative Studio Output',
       prompt,
-      size: '1024x1024',
-    }),
-  })
-
-  if (!response.ok) {
-    throw new Error(`Image generation failed with status ${response.status}.`)
+      '#1d4ed8',
+      '#ec4899',
+    )
   }
 
-  const data = await response.json()
-  const image = data.data?.[0]
+  try {
+    const response = await fetch('https://api.openai.com/v1/images/generations', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: OPENAI_IMAGE_MODEL,
+        prompt,
+        size: '1024x1024',
+      }),
+    })
 
-  if (image?.url) {
-    return { url: image.url, alt: prompt }
-  }
+    if (!response.ok) {
+      throw new Error(`Image generation failed with status ${response.status}.`)
+    }
 
-  if (image?.b64_json) {
+    const data = await response.json()
+    const image = data.data?.[0]
+
+    if (image?.url) {
+      return { url: image.url, alt: prompt }
+    }
+
+    if (image?.b64_json) {
+      return {
+        url: `data:image/png;base64,${image.b64_json}`,
+        alt: prompt,
+      }
+    }
+
+    throw new Error('No image data was returned from the image model.')
+  } catch (error) {
+    console.warn('Falling back to local placeholder image.', error)
     return {
-      url: `data:image/png;base64,${image.b64_json}`,
-      alt: prompt,
+      ...buildImageFallback('Creative Studio Output', prompt, '#1d4ed8', '#ec4899'),
     }
   }
-
-  throw new Error('No image data was returned from the image model.')
 }
 
 export function readFileAsDataUrl(file) {
@@ -150,41 +183,40 @@ export function readFileAsDataUrl(file) {
 
 export async function analyzeImageFromBase64(base64Image, analysisPrompt) {
   if (!hasUsableOpenAIKey()) {
-    return {
-      mainObjects: 'A hero subject framed prominently with supporting environmental details.',
-      colorPalette: 'Deep teal, soft apricot highlights, charcoal shadows, and muted cream accents.',
-      artisticStyle: 'Glossy campaign photography with cinematic contrast and editorial polish.',
-      variationPrompt:
-        'Create a fresh editorial variation of the uploaded scene with the same key subject, deep teal and apricot palette, cinematic lighting, refined textures, and a premium campaign feel.',
-    }
+    return buildAnalysisFallback()
   }
 
-  const content = await callOpenAIChat([
-    {
-      role: 'system',
-      content:
-        'You are a vision analyst. Return only valid JSON with the requested keys and concise string values.',
-    },
-    {
-      role: 'user',
-      content: [
-        { type: 'text', text: analysisPrompt },
-        {
-          type: 'image_url',
-          image_url: {
-            url: base64Image,
+  try {
+    const content = await callOpenAIChat([
+      {
+        role: 'system',
+        content:
+          'You are a vision analyst. Return only valid JSON with the requested keys and concise string values.',
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: analysisPrompt },
+          {
+            type: 'image_url',
+            image_url: {
+              url: base64Image,
+            },
           },
-        },
-      ],
-    },
-  ])
+        ],
+      },
+    ])
 
-  const parsed = parseJsonSafely(content)
-  if (!parsed) {
-    throw new Error('The vision response was not valid JSON.')
+    const parsed = parseJsonSafely(content)
+    if (!parsed) {
+      throw new Error('The vision response was not valid JSON.')
+    }
+
+    return parsed
+  } catch (error) {
+    console.warn('Falling back to local image analysis.', error)
+    return buildAnalysisFallback()
   }
-
-  return parsed
 }
 
 export async function generateVariationFromAnalysis(analysis) {
@@ -194,15 +226,12 @@ export async function generateVariationFromAnalysis(analysis) {
   }
 
   if (!hasUsableOpenAIKey()) {
-    return {
-      url: createSvgPlaceholder(
-        'Style Lab Variation',
-        prompt.slice(0, 120),
-        '#0f766e',
-        '#f97316',
-      ),
-      alt: prompt,
-    }
+    return buildImageFallback(
+      'Style Lab Variation',
+      prompt,
+      '#0f766e',
+      '#f97316',
+    )
   }
 
   return generateImageFromPrompt(prompt)
